@@ -1,0 +1,274 @@
+plugins {
+    id 'java'
+    id 'application'
+    id 'checkstyle'
+    id 'com.diffplug.spotless' version '8.6.0'
+}
+
+group = 'org.cpsc2150'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+dependencies {
+    testImplementation platform('org.junit:junit-bom:6.0.0')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+application {
+    mainClass = 'cpsc2150.registration.Main'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+checkstyle {
+    toolVersion = '12.2.0'
+    configFile = file('config/checkstyle/checkstyle.xml')
+
+    // Fail the build when style violations are found.
+    ignoreFailures = false
+
+    // Treat Checkstyle warnings seriously.
+    maxWarnings = 0
+}
+
+tasks.withType(Checkstyle).configureEach {
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
+tasks.withType(Javadoc).configureEach {
+    options.tags = [
+            'pre:a:Precondition:',
+            'post:a:Postcondition:'
+    ]
+}
+
+/*
+ * Spotless formats all Java files using google-java-format.
+ * To run spotless, use the command: ./gradlew spotlessApply
+ */
+spotless {
+    java {
+        target 'src/**/*.java'
+        googleJavaFormat('1.29.0')
+        removeUnusedImports()
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
+}
+
+/*
+ * validateContracts checks RegistrationManager.java for the required
+ * Design by Contract Javadocs on register and wouldExceedMaxCredits.
+ */
+tasks.register('validateContracts') {
+    group = 'verification'
+    description = 'Checks that required Design by Contract Javadocs exist in RegistrationManager.java.'
+
+    inputs.file('src/main/java/cpsc2150/registration/RegistrationManager.java')
+
+    doLast {
+        def sourceFile = file('src/main/java/cpsc2150/registration/RegistrationManager.java')
+
+        if (!sourceFile.exists()) {
+            throw new GradleException('RegistrationManager.java was not found.')
+        }
+
+        def source = sourceFile.text
+
+        def requiredMethods = [
+                'register'              : [
+                        'signature': /public\s+RegistrationResult\s+register\s*\(\s*Student\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*,\s*Course\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\)/
+                ],
+                'wouldExceedMaxCredits' : [
+                        'signature': /public\s+boolean\s+wouldExceedMaxCredits\s*\(\s*Student\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*,\s*Course\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\)/
+                ]
+        ]
+
+        requiredMethods.each { methodName, rule ->
+            def signatureMatcher = source =~ rule.signature
+
+            if (!signatureMatcher.find()) {
+                throw new GradleException(
+                        "Missing required method signature for ${methodName}. " +
+                                "Expected a public method with parameters Student and Course."
+                )
+            }
+
+            def studentParamName = signatureMatcher.group(1)
+            def courseParamName = signatureMatcher.group(2)
+
+            if (studentParamName.length() < 2 || courseParamName.length() < 2) {
+                throw new GradleException(
+                        "The parameters for ${methodName} must have descriptive names longer than one character."
+                )
+            }
+
+            def signatureStart = signatureMatcher.start()
+            def beforeSignature = source.substring(0, signatureStart)
+            def javadocStart = beforeSignature.lastIndexOf('/**')
+            def javadocEnd = beforeSignature.lastIndexOf('*/')
+
+            if (javadocStart == -1 || javadocEnd == -1 || javadocEnd < javadocStart) {
+                throw new GradleException(
+                        "Missing Javadocs for ${methodName} in RegistrationManager.java."
+                )
+            }
+
+            def betweenJavadocAndMethod = beforeSignature.substring(javadocEnd + 2).trim()
+
+            if (betweenJavadocAndMethod.length() > 0) {
+                throw new GradleException(
+                        "The Javadocs for ${methodName} must be placed directly before the method."
+                )
+            }
+
+            def javadoc = beforeSignature.substring(javadocStart, javadocEnd + 2)
+
+            def requiredTags = [
+                    "@param ${studentParamName}",
+                    "@param ${courseParamName}",
+                    '@return',
+                    '@pre',
+                    '@post'
+            ]
+
+            requiredTags.each { tag ->
+                if (!javadoc.contains(tag)) {
+                    throw new GradleException(
+                            "The Javadocs for ${methodName} are missing required tag: ${tag}"
+                    )
+                }
+            }
+
+            requireTagText(javadoc, methodName, "@param ${studentParamName}")
+            requireTagText(javadoc, methodName, "@param ${courseParamName}")
+            requireTagText(javadoc, methodName, '@return')
+            requireTagText(javadoc, methodName, '@pre')
+            requireTagText(javadoc, methodName, '@post')
+
+            requireDescriptionText(javadoc, methodName)
+        }
+    }
+}
+
+/*
+ * requireTagText is a helper for validateContracts.
+ * It fails the build when a required Javadoc tag is present but empty.
+ */
+def requireTagText(String javadoc, String methodName, String tag) {
+    def escapedTag = java.util.regex.Pattern.quote(tag)
+    def pattern = /(?m)^\s*\*\s*${escapedTag}\s+\S+.*$/
+
+    if (!(javadoc =~ pattern).find()) {
+        throw new GradleException(
+                "The Javadocs for ${methodName} must include meaningful text after ${tag}."
+        )
+    }
+}
+
+/*
+ * requireDescriptionText is a helper for validateContracts.
+ * It fails the build when a Javadoc block has tags but no description.
+ */
+def requireDescriptionText(String javadoc, String methodName) {
+    def cleanedLines = javadoc
+            .readLines()
+            .collect { it.replaceFirst(/^\s*\/\*\*/, '') }
+            .collect { it.replaceFirst(/^\s*\*\//, '') }
+            .collect { it.replaceFirst(/^\s*\*\s?/, '') }
+            .collect { it.trim() }
+            .findAll { it.length() > 0 }
+
+    def descriptionLines = cleanedLines.findAll {
+        !it.startsWith('@param')
+                && !it.startsWith('@return')
+                && !it.startsWith('@pre')
+                && !it.startsWith('@post')
+    }
+
+    if (descriptionLines.isEmpty()) {
+        throw new GradleException(
+                "The Javadocs for ${methodName} must include a description before the tags."
+        )
+    }
+}
+
+/*
+ * BenchmarkCheck runs the main benchmark checks.
+ * It checks formatting, Checkstyle, compilation, and required contracts.
+ */
+tasks.register('benchmarkCheck') {
+    group = 'benchmark'
+    description = 'Runs formatting, Checkstyle, compilation, and contract checks.'
+    dependsOn 'spotlessCheck', 'checkstyleMain', 'assemble'
+    dependsOn tasks.named('validateContracts')
+}
+
+/*
+ * copySubmissionReports copies existing Gradle reports into submission-reports.
+ * It does not generate reports; it only copies reports that already exist.
+ */
+tasks.register('copySubmissionReports', Copy) {
+    group = 'verification'
+    description = 'Copies available benchmark reports into submission-reports/.'
+
+    doFirst {
+        delete 'submission-reports'
+    }
+
+    from('build/reports/checkstyle') {
+        into 'checkstyle'
+    }
+
+    from('build/reports/tests/test') {
+        into 'tests'
+    }
+
+    from('build/docs/javadoc') {
+        into 'javadoc'
+    }
+
+    into 'submission-reports'
+}
+
+/*
+ * benchmarkTest runs the provided tests and generates the test report.
+ */
+tasks.register('benchmarkTest') {
+    group = 'benchmark'
+    description = 'Runs the provided tests and generates the test report.'
+    dependsOn 'test'
+}
+
+/*
+ * benchmarkJavadocs generates the Javadocs report.
+ */
+tasks.register('benchmarkJavadocs') {
+    group = 'benchmark'
+    description = 'Generates the Javadocs report.'
+    dependsOn 'javadoc'
+}
+
+/*
+ * benchmarkCopyReports copies existing reports into submission-reports.
+ */
+tasks.register('benchmarkCopyReports') {
+    group = 'benchmark'
+    description = 'Copies generated reports into submission-reports.'
+    dependsOn 'copySubmissionReports'
+}
